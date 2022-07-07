@@ -1,0 +1,206 @@
+módulo responsável por realizar a criação de uma tabela com os dados dos exames segmentados e avaliados pelo modelo
+'''
+
+
+import SimpleITK as sitk
+import numpy as np
+import pandas as pd
+import os
+from datetime import datetime
+
+
+class SingletonMeta(type):
+    """
+    https://refactoring.guru/pt-br/design-patterns/singleton/python/example
+    The Singleton class can be implemented in different ways in Python. Some
+    possible methods include: base class, decorator, metaclass. We will use the
+    metaclass because it is best suited for this purpose.
+    """
+
+    _instances = {}
+
+    def __call__(cls, *args, **kwargs):
+        """
+        Possible changes to the value of the `__init__` argument do not affect
+        the returned instance.
+        """
+        if cls not in cls._instances:
+            instance = super().__call__(*args, **kwargs)
+            cls._instances[cls] = instance
+        return cls._instances[cls]
+
+
+class SingletonEvaluation(metaclass=SingletonMeta):
+    # iniciar a criacao da tabela
+    # se a tabela existir, ler a tabela e concatenar o resultado no final da tabela, se não existir, criar a tabela
+
+
+    def __init__(self):
+        # body of the constructor
+        now = datetime.now()
+        agora = now.strftime("%d_%m_%Y_%H_%M")
+        self.brain_mask = None
+        self.ventr_mask = None
+        self.brain_gt = None
+        self.ventr_gt = None
+        self.master_image = None
+        self.series_reader = None
+        self.table_name = None
+        self.series_id = None
+
+    def save_csv(self, data, table_name):
+        df = pd.DataFrame(data)
+        # df.to_csv(table_name, mode='a', index=False, sep=';')
+        df = df.round(decimals = 3)
+        # if an old table_name exists, it deletes
+        if os.path.exists(table_name):
+            df.to_csv(table_name, mode ='a', sep=';', encoding='utf-8', decimal=',', index=False, header=False)
+        else:
+            df.to_csv(table_name, mode='a', sep=';', encoding='utf-8', decimal=',', index=False, header=True)
+
+
+    def stats_filter_GetPhysicalSize(self, col, stats_filter, data):
+        try:
+            data[col].append(round(stats_filter.GetPhysicalSize(1) / 1000, 3))
+        except:
+            data[col].append(np.nan)
+
+
+    def create_metrics(self,
+                       brain_mask,
+                       ventr_mask,
+                       brain_gt,
+                       ventr_gt,
+                       master_image,
+                       table_name,
+                       series_reader=None,
+                       series_id=None):
+
+        self.brain_mask = brain_mask
+        self.ventr_mask = ventr_mask
+        self.brain_gt = brain_gt
+        self.ventr_gt = ventr_gt
+        self.master_image = master_image
+        self.table_name = table_name
+        self.series_reader = series_reader
+        self.series_id = series_id
+
+        # If it is a dicom file, series_reader is not None
+        if self.series_reader:
+
+            data = {
+                'patient_ID': [],
+                'series_instance_iud': [],
+                'patient_sex': [],
+                'birth': [],
+                'acquisition': [],
+                'series_description': [],
+                'machine': [],
+                'kernel': [],
+                'slice_thickness': [],
+                'pixel_spacing': [],
+                'number_of_slices': [],
+            }
+
+            data['patient_ID'].append(self.series_reader.GetMetaData(1, "0010|0020"))
+            data['series_instance_iud'].append(self.series_reader.GetMetaData(1, "0020|000e"))
+            data['patient_sex'].append(self.series_reader.GetMetaData(1, "0010|0040"))
+            data['birth'].append(self.series_reader.GetMetaData(1, "0010|0030"))
+            data['acquisition'].append(self.series_reader.GetMetaData(1, "0008|0022"))
+            data['series_description'].append(self.series_reader.GetMetaData(1, "0008|103e"))
+            data['machine'].append(self.series_reader.GetMetaData(1, "0008|0070"))
+            data['kernel'].append(self.series_reader.GetMetaData(1, "0018|1210"))
+            data['slice_thickness'].append(self.series_reader.GetMetaData(1, "0018|0050"))
+            data['pixel_spacing'].append(self.series_reader.GetMetaData(1, "0028|0030"))
+            data['number_of_slices'].append(len(self.series_reader.GetFileNames()))
+
+        # If it is a nifti, it should have series_id and we do not have the metadata from series_reader
+        else:
+
+            data = {
+                'series_ID': [],
+            }
+
+            if self.series_id:
+                data['series_ID'].append(self.series_id)
+            else:
+                data['series_ID'].append('No series Id')
+
+        data['brain_vol_deep'] = []
+        data['brain_vol_sitk'] = []
+        data['ventricle_vol_deep'] = []
+        data['ventricle_vol_sitk'] = []
+        data['brain_jaccard_deep_sitk'] = []
+        data['ventricle_jaccard_deep_sitk'] = []
+        data['brain_dice_deep_sitk'] = []
+        data['ventricle_dice_deep_sitk'] = []
+        data['brain_Hausdorff_deep_sitk'] = []
+        data['ventricle_Hausdorff_deep_sitk'] = []
+
+        self.brain_mask.CopyInformation(self.master_image)
+        self.ventr_mask.CopyInformation(self.master_image)
+        # ground-truth
+        self.brain_gt.CopyInformation(self.master_image)
+        self.ventr_gt.CopyInformation(self.master_image)
+
+        # instantiates a filter that calculates statistics from the label objects
+        stats_filter = sitk.LabelShapeStatisticsImageFilter()
+        overlap_measures_filter = sitk.LabelOverlapMeasuresImageFilter()
+        hausdorff_distance_filter = sitk.HausdorffDistanceImageFilter()
+
+        # Casts the maks from DeepCT3D from float to int because it appears to be fuzzy
+        self.brain_mask = sitk.Cast(self.brain_mask, sitk.sitkUInt8)
+        stats_filter.Execute(self.brain_mask)
+        self.stats_filter_GetPhysicalSize('brain_vol_deep', stats_filter, data)
+
+        self.brain_gt = sitk.Cast(self.brain_gt, sitk.sitkUInt8)
+        stats_filter.Execute(self.brain_gt)
+        self.stats_filter_GetPhysicalSize('brain_vol_sitk', stats_filter, data)
+
+        self.ventr_mask = sitk.Cast(self.ventr_mask, sitk.sitkUInt8)
+        stats_filter.Execute(self.ventr_mask)
+        self.stats_filter_GetPhysicalSize('ventricle_vol_deep', stats_filter, data)
+
+        self.ventr_gt = sitk.Cast(self.ventr_gt, sitk.sitkUInt8)
+        stats_filter.Execute(self.ventr_gt)
+        self.stats_filter_GetPhysicalSize('ventricle_vol_sitk', stats_filter, data)
+
+        # brain ground truth masks overlap and distance measures SITK vs Deep
+
+        try:
+            overlap_measures_filter.Execute(self.brain_gt, self.brain_mask)
+            data['brain_jaccard_deep_sitk'].append(overlap_measures_filter.GetJaccardCoefficient())
+        except:
+            data['brain_jaccard_deep_sitk'].append(np.nan)
+
+        try:
+            data['brain_dice_deep_sitk'].append(overlap_measures_filter.GetDiceCoefficient())
+        except:
+            data['brain_dice_deep_sitk'].append(np.nan)
+
+        try:
+            hausdorff_distance_filter.Execute(self.brain_gt, self.brain_mask)
+            data['brain_Hausdorff_deep_sitk'].append(hausdorff_distance_filter.GetHausdorffDistance())
+        except:
+            data['brain_Hausdorff_deep_sitk'].append(np.nan)
+
+        # ventricle ground truth masks overlap and distance measures SITK vs Deep
+
+        try:
+            overlap_measures_filter.Execute(self.ventr_gt, self.ventr_mask)
+            data['ventricle_jaccard_deep_sitk'].append(overlap_measures_filter.GetJaccardCoefficient())
+        except:
+            data['ventricle_jaccard_deep_sitk'].append(np.nan)
+
+        try:
+            data['ventricle_dice_deep_sitk'].append(overlap_measures_filter.GetDiceCoefficient())
+        except:
+            data['ventricle_dice_deep_sitk'].append(np.nan)
+
+        try:
+            hausdorff_distance_filter.Execute(self.ventr_gt, self.ventr_mask)
+            data['ventricle_Hausdorff_deep_sitk'].append(hausdorff_distance_filter.GetHausdorffDistance())
+        except:
+            data['ventricle_Hausdorff_deep_sitk'].append(np.nan)
+
+        self.save_csv(data, table_name)
